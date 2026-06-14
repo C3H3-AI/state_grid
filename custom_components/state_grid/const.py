@@ -1,7 +1,7 @@
 DOMAIN = "state_grid"
 PACKAGE_NAME = "custom_components.state_grid"
-VERSION = "0.4.1"
-VERSION_STORAGE = 11
+VERSION = "0.4.2"
+VERSION_STORAGE = 12
 STORAGE_KEY = "state_grid.config"
 
 # 流控相关错误码（手机号登录遇限流时，自动降级为邮箱登录）

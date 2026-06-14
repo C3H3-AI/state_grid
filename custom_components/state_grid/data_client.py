@@ -1,5 +1,5 @@
 """
-国家电网数据客户端 - v0.4.1
+国家电网数据客户端 - v0.4.2
 
 基于 bilezhou/state_grid 原版修改，主要变更:
 1. 支持点选验证码（LLM 视觉大模型识别）
@@ -489,7 +489,10 @@ class StateGridDataClient:
                 if 'errcode' in email_result and email_result['errcode'] == 0:
                     self.need_login = False
                     self.shown_notification = False
-                    await self.save_data()
+                    try:
+                        await self.save_data()
+                    except Exception as save_ex:
+                        LOGGER.exception("邮箱降级登录成功但保存数据失败: %s", save_ex)
                     return await self.__fetch(api, data)
                 else:
                     LOGGER.error("邮箱降级登录也失败了，等待下次轮询重试")
@@ -528,7 +531,10 @@ class StateGridDataClient:
         if 'errcode' in result and result['errcode'] == 0:
             self.need_login = False
             self.shown_notification = False
-            await self.save_data()
+            try:
+                await self.save_data()
+            except Exception as save_ex:
+                LOGGER.exception("手机号登录成功但保存数据失败: %s", save_ex)
             return
         # 手机号登录失败，如果配置了邮箱，尝试邮箱降级
         if self.email_account and self._is_flow_control_error(result):
@@ -537,7 +543,10 @@ class StateGridDataClient:
             if 'errcode' in result and result['errcode'] == 0:
                 self.need_login = False
                 self.shown_notification = False
-                await self.save_data()
+                try:
+                    await self.save_data()
+                except Exception as save_ex:
+                    LOGGER.exception("邮箱降级登录成功但保存数据失败: %s", save_ex)
 
     async def __fetch(self, api, data, header=None):
         self.timestamp = int(time.time() * 1000)
@@ -1170,7 +1179,11 @@ class StateGridDataClient:
         if result.get('errcode') != 0:
             return result
         self.need_login = False
-        await self.save_data()
+        try:
+            await self.save_data()
+        except Exception as ex:
+            LOGGER.exception("登录成功但保存数据失败: %s", ex)
+            # 保存失败不影响登录成功
         return {'errcode': 0}
 
     def _show_token_notification(self):
