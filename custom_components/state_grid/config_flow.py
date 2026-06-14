@@ -60,6 +60,22 @@ class StateGridOnnxConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         phone, email or "未配置", llm_model,
                     )
                     result = await dc.password_login(phone, password, encode=False, retry=3)
+
+                    # 如果手机号登录遇RK001流控，且配置了备用邮箱，自动降级到邮箱登录
+                    if result.get("errcode") != 0 and email and (
+                        result.get("rk001") or
+                        "RK001" in (result.get("errmsg") or "") or
+                        "流控" in (result.get("errmsg") or "")
+                    ):
+                        LOGGER.info("[配置流程] 手机号遇RK001流控，自动降级到邮箱登录: %s", email)
+                        try:
+                            import hashlib
+                            pwd_md5 = hashlib.md5(password.encode()).hexdigest().upper()
+                            result = await dc._login_with_email_fallback(pwd_md5, retry=2)
+                        except Exception as fallback_exc:
+                            LOGGER.exception("[配置流程] 邮箱降级登录异常: %s", fallback_exc)
+                            result = {"errcode": 1, "errmsg": f"邮箱降级登录异常: {fallback_exc}"}
+
                 except Exception as exc:
                     LOGGER.error("国家电网登录异常: %s", exc)
                     errors["base"] = "cannot_connect"
