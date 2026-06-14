@@ -1339,8 +1339,18 @@ class StateGridDataClient:
             for item in result['data']['bizrt']['powerUserList']:
                 if item['consNo_dst'] in exist_map:
                     new_list.append(exist_map[item['consNo_dst']])
-                elif 'elecTypeCode' in item and item['elecTypeCode'] != '05':
-                    new_list.append(item)
+                else:
+                    # 过滤 elecTypeCode='05'（非居民用户），保留其他所有户表
+                    # 注意：有些返回可能没有 elecTypeCode 字段，此时应保留
+                    elec_type = item.get('elecTypeCode', '')
+                    if elec_type != '05':
+                        # 确保每项都有 consType 字段（余额查询必需）
+                        if 'consType' not in item:
+                            item['consType'] = '1'  # 默认预付费
+                            LOGGER.warning("[户号] %s 缺少consType字段，默认设为'1'(预付费)", item.get('consNo_dst', '?'))
+                        new_list.append(item)
+            LOGGER.info("[户号] 获取到 %d 个户表（总共 %d 个，过滤非居民05后）",
+                        len(new_list), len(result['data']['bizrt']['powerUserList']))
             self.powerUserList = new_list
             return {'errcode': 0}
         return {'errcode': 1, 'errmsg': msg}
@@ -1359,7 +1369,7 @@ class StateGridDataClient:
                     'consNoSrc': door_account['consNo_dst'],
                     'proCode': door_account.get('proNo', door_account.get('provinceId', None)),
                     'sceneType': door_account.get('consSortCode', door_account.get('elecTypeCode', None)),
-                    'consType': door_account['consType'],
+                    'consType': door_account.get('consType', '1'),
                     'orgNo': door_account['orgNo'],
                 }],
             },
@@ -1380,7 +1390,7 @@ class StateGridDataClient:
                 'acctId': self.userInfo['userId'],
                 'channelCode': configuration['channelCode'],
                 'getday': '11',
-                'consType': door_account['consType'],
+                'consType': door_account.get('consType', '1'),
                 'funcCode': 'ALIPAY_01',
                 'orgNo': door_account['orgNo'],
                 'proCode': door_account['proNo'],
@@ -1424,7 +1434,7 @@ class StateGridDataClient:
                 'orgNo': door_account['orgNo'],
                 'queryDate': query_str,
                 'provinceCode': door_account['proNo'],
-                'consType': door_account['consType'],
+                'consType': door_account.get('consType', '1'),
                 'userAccountId': self.userInfo['userId'],
                 'serialNo': '', 'srvCode': '',
                 'userName': self.userInfo['loginAccount'],
@@ -1544,243 +1554,249 @@ class StateGridDataClient:
             start_date = f"{start.year}-{start.month:02d}-{start.day:02d}"
 
             for account in self.powerUserList:
-                cons_no = account['consNo_dst']
-                self.doorAccountDict[cons_no] = account
+                try:
+                    cons_no = account['consNo_dst']
+                    self.doorAccountDict[cons_no] = account
 
-                # 获取余额
-                await self.__get_door_balance(account)
-                if self.need_login:
-                    return
+                    # 获取余额
+                    await self.__get_door_balance(account)
+                    if self.need_login:
+                        return
 
-                if 'account_balance' in account:
-                    balance_data = account['account_balance']
-                    account_balance = catchFloat(balance_data, 'accountBalance')
-                    esti_amt = catchFloat(balance_data, 'estiAmt')
-                    prepay_bal = catchFloat(balance_data, 'prepayBal')
-                    sum_money = catchFloat(balance_data, 'sumMoney')
-                    history_owe = catchFloat(balance_data, 'historyOwe')
-                    cons_type = balance_data['consType']
-                    is_ment = ''
-                    if 'isMent' in balance_data:
-                        is_ment = balance_data['isMent']
+                    if 'account_balance' in account:
+                        balance_data = account['account_balance']
+                        account_balance = catchFloat(balance_data, 'accountBalance')
+                        esti_amt = catchFloat(balance_data, 'estiAmt')
+                        prepay_bal = catchFloat(balance_data, 'prepayBal')
+                        sum_money = catchFloat(balance_data, 'sumMoney')
+                        history_owe = catchFloat(balance_data, 'historyOwe')
+                        cons_type = balance_data.get('consType', '1')
+                        is_ment = ''
+                        if 'isMent' in balance_data:
+                            is_ment = balance_data['isMent']
 
-                    is_prepaid = cons_type == '1'
-                    is_postpaid = cons_type == '0'
-                    is_owe = not (not is_postpaid or is_ment != '1')
+                        is_prepaid = cons_type == '1'
+                        is_postpaid = cons_type == '0'
+                        is_owe = not (not is_postpaid or is_ment != '1')
 
-                    balance = 0
-                    if is_prepaid:
-                        balance = sum_money
-                    if is_postpaid and not is_owe:
-                        balance = -abs(sum_money)
-                    if is_postpaid and is_owe:
-                        balance = sum_money
-                    if account_balance != 0:
-                        balance = account_balance
-                    account['balance'] = balance
+                        balance = 0
+                        if is_prepaid:
+                            balance = sum_money
+                        if is_postpaid and not is_owe:
+                            balance = -abs(sum_money)
+                        if is_postpaid and is_owe:
+                            balance = sum_money
+                        if account_balance != 0:
+                            balance = account_balance
+                        account['balance'] = balance
 
-                    # 借鉴 sgcc_electricity_new: 增加预付费余额
-                    if prepay_bal != 0:
-                        account['prepay_balance'] = prepay_bal
-                else:
-                    LOGGER.error('国家电网账户余额获取失败！')
+                        # 借鉴 sgcc_electricity_new: 增加预付费余额
+                        if prepay_bal != 0:
+                            account['prepay_balance'] = prepay_bal
+                    else:
+                        LOGGER.error('国家电网账户余额获取失败！')
 
-                if 'balance' not in account:
-                    account['balance'] = 0
+                    if 'balance' not in account:
+                        account['balance'] = 0
 
-                # 获取日用电量
-                await self.__get_door_daily_bill(account, now.year, start_date, end_date)
-                if 'daily_bill_list' not in account:
-                    LOGGER.error('国家电网无法获取日用电数据！')
-                    continue
+                    # 获取日用电量
+                    await self.__get_door_daily_bill(account, now.year, start_date, end_date)
+                    if 'daily_bill_list' not in account:
+                        LOGGER.error('国家电网无法获取日用电数据！')
+                        continue
 
-                # 解析日用电数据
-                valid_offset = 0
-                has_valid = False
-                for k in range(10):
-                    try:
-                        float(account['daily_bill_list'][k]['dayElePq'])
-                        has_valid = True
-                        break
-                    except Exception:
-                        valid_offset += 1
-
-                daily_total = 0
-                daily_peak = 0
-                daily_valley = 0
-                daily_flat = 0
-                daily_sharp = 0
-                account['daily_lasted_date'] = f"{now.year}-{now.month:02d}-{now.day:02d}"
-
-                if has_valid:
-                    for k in range(valid_offset):
-                        account['daily_bill_list'].pop(0)
-                    latest = account['daily_bill_list'][0]
-                    latest_date = datetime.datetime.strptime(latest['day'], '%Y%m%d')
-                    account['daily_lasted_date'] = f"{latest_date.year}-{latest_date.month:02d}-{latest_date.day:02d}"
-                    daily_total = catchFloat(latest, 'dayElePq')
-                    daily_peak = catchFloat(latest, 'errmsg')
-                    daily_valley = catchFloat(latest, 'thisVPq')
-                    daily_flat = catchFloat(latest, 'thisNPq')
-                    daily_sharp = catchFloat(latest, 'thisPPq')
-
-                account['daily_ele_num'] = normal_round(daily_total, 2)
-                account['daily_p_ele_num'] = normal_round(daily_peak, 2)
-                account['daily_v_ele_num'] = normal_round(daily_valley, 2)
-                account['daily_n_ele_num'] = normal_round(daily_flat, 2)
-                account['daily_t_ele_num'] = normal_round(daily_sharp, 2)
-
-                # 月度累计
-                month_total = 0
-                month_peak = 0
-                month_valley = 0
-                month_flat = 0
-                month_sharp = 0
-
-                if has_valid:
-                    for item in account['daily_bill_list']:
-                        item_date = datetime.datetime.strptime(item['day'], '%Y%m%d')
-                        if item_date.month != latest_date.month:
+                    # 解析日用电数据
+                    valid_offset = 0
+                    has_valid = False
+                    for k in range(10):
+                        try:
+                            float(account['daily_bill_list'][k]['dayElePq'])
+                            has_valid = True
                             break
-                        month_total += catchFloat(item, 'dayElePq')
-                        month_peak += catchFloat(item, 'errmsg')
-                        month_valley += catchFloat(item, 'thisVPq')
-                        month_flat += catchFloat(item, 'thisNPq')
-                        month_sharp += catchFloat(item, 'thisPPq')
+                        except Exception:
+                            valid_offset += 1
 
-                account['month_ele_num'] = normal_round(month_total, 2)
-                account['month_p_ele_num'] = normal_round(month_peak, 2)
-                account['month_v_ele_num'] = normal_round(month_valley, 2)
-                account['month_n_ele_num'] = normal_round(month_flat, 2)
-                account['month_t_ele_num'] = normal_round(month_sharp, 2)
+                    daily_total = 0
+                    daily_peak = 0
+                    daily_valley = 0
+                    daily_flat = 0
+                    daily_sharp = 0
+                    account['daily_lasted_date'] = f"{now.year}-{now.month:02d}-{now.day:02d}"
 
-                # 年度数据
-                if has_valid:
-                    last_month = latest_date - datetime.timedelta(days=latest_date.day)
-                    if 'month_bill_list' not in account or len(account['month_bill_list']) < 12:
-                        await self.__get_door_bill(account, last_month.year - 1)
-                    year_data = await self.__get_door_bill(account, last_month.year)
-                    if year_data is not None:
-                        account['yearTotalCost'] = year_data
+                    if has_valid:
+                        for k in range(valid_offset):
+                            account['daily_bill_list'].pop(0)
+                        latest = account['daily_bill_list'][0]
+                        latest_date = datetime.datetime.strptime(latest['day'], '%Y%m%d')
+                        account['daily_lasted_date'] = f"{latest_date.year}-{latest_date.month:02d}-{latest_date.day:02d}"
+                        daily_total = catchFloat(latest, 'dayElePq')
+                        daily_peak = catchFloat(latest, 'errmsg')
+                        daily_valley = catchFloat(latest, 'thisVPq')
+                        daily_flat = catchFloat(latest, 'thisNPq')
+                        daily_sharp = catchFloat(latest, 'thisPPq')
 
-                    current_year_bills = []
+                    account['daily_ele_num'] = normal_round(daily_total, 2)
+                    account['daily_p_ele_num'] = normal_round(daily_peak, 2)
+                    account['daily_v_ele_num'] = normal_round(daily_valley, 2)
+                    account['daily_n_ele_num'] = normal_round(daily_flat, 2)
+                    account['daily_t_ele_num'] = normal_round(daily_sharp, 2)
+
+                    # 月度累计
+                    month_total = 0
+                    month_peak = 0
+                    month_valley = 0
+                    month_flat = 0
+                    month_sharp = 0
+
+                    if has_valid:
+                        for item in account['daily_bill_list']:
+                            item_date = datetime.datetime.strptime(item['day'], '%Y%m%d')
+                            if item_date.month != latest_date.month:
+                                break
+                            month_total += catchFloat(item, 'dayElePq')
+                            month_peak += catchFloat(item, 'errmsg')
+                            month_valley += catchFloat(item, 'thisVPq')
+                            month_flat += catchFloat(item, 'thisNPq')
+                            month_sharp += catchFloat(item, 'thisPPq')
+
+                    account['month_ele_num'] = normal_round(month_total, 2)
+                    account['month_p_ele_num'] = normal_round(month_peak, 2)
+                    account['month_v_ele_num'] = normal_round(month_valley, 2)
+                    account['month_n_ele_num'] = normal_round(month_flat, 2)
+                    account['month_t_ele_num'] = normal_round(month_sharp, 2)
+
+                    # 年度数据
+                    if has_valid:
+                        last_month = latest_date - datetime.timedelta(days=latest_date.day)
+                        if 'month_bill_list' not in account or len(account['month_bill_list']) < 12:
+                            await self.__get_door_bill(account, last_month.year - 1)
+                        year_data = await self.__get_door_bill(account, last_month.year)
+                        if year_data is not None:
+                            account['yearTotalCost'] = year_data
+
+                        current_year_bills = []
+                        if 'month_bill_list' in account:
+                            for item in account['month_bill_list']:
+                                if 'month_ele' not in item:
+                                    await self.__get_door_mouth_bill(account, item)
+                                if 'daily_ele' not in item:
+                                    yr, ms, me = get_month_date_range(item['month'])
+                                    e_str = f"{me.year}-{me.month:02d}-{me.day:02d}"
+                                    s_str = f"{ms.year}-{ms.month:02d}-{ms.day:02d}"
+                                    await self.__get_door_daily_bill(account, int(yr), s_str, e_str, item)
+                                if item['month'].startswith(str(last_month.year)):
+                                    current_year_bills.append(item)
+                        account['year_bill_list'] = sorted(current_year_bills, key=lambda x: x['month'], reverse=True)
+
+                    if 'yearTotalCost' in account:
+                        account['year_ele_num'] = catchFloat(account['yearTotalCost'], 'totalEleNum')
+                        account['year_ele_cost'] = catchFloat(account['yearTotalCost'], 'totalEleCost')
+                    if 'year_ele_num' not in account:
+                        account['year_ele_num'] = 0
+                        account['year_ele_cost'] = 0
+
+                    # 上月数据
+                    last_month_usage = 0
+                    last_month_cost = 0
+                    last_month_meter = 0
+                    last_bill_date = yesterday
+
+                    if 'year_bill_list' in account and len(account['year_bill_list']) > 0:
+                        latest_bill = account['year_bill_list'][0]
+                        account['last_month_ele_num'] = catchFloat(latest_bill, 'monthEleNum')
+                        account['last_month_ele_cost'] = catchFloat(latest_bill, 'monthEleCost')
+                        if 'month_ele' in latest_bill:
+                            last_month_meter = latest_bill['month_ele']['month_meter_num']
+                        last_bill_date = datetime.datetime.strptime(latest_bill['month'], '%Y%m')
+
+                    if 'last_month_ele_num' not in account:
+                        account['last_month_ele_num'] = 0
+                        account['last_month_ele_cost'] = 0
+
+                    account['last_month_meter_num'] = int(last_month_meter)
+
+                    # 年度累计（从月账单汇总）
+                    year_total = 0
+                    year_peak = 0
+                    year_valley = 0
+                    year_flat = 0
+                    year_sharp = 0
+
+                    if last_bill_date.month == 12:
+                        year_total = account['month_ele_num']
+                        year_peak = account['month_p_ele_num']
+                        year_valley = account['month_v_ele_num']
+                        year_flat = account['month_n_ele_num']
+                        year_sharp = account['month_t_ele_num']
+                    else:
+                        if 'year_bill_list' in account:
+                            for bill in account['year_bill_list']:
+                                year_total += catchFloat(bill, 'monthEleNum')
+                                year_peak += bill.get('month_p_ele_num', 0)
+                                year_valley += bill.get('month_v_ele_num', 0)
+                                year_flat += bill.get('month_n_ele_num', 0)
+                                year_sharp += bill.get('month_t_ele_num', 0)
+                        if has_valid and latest_date.month != last_bill_date.month:
+                            year_total += account['month_ele_num']
+                            year_peak += account['month_p_ele_num']
+                            year_valley += account['month_v_ele_num']
+                            year_flat += account['month_n_ele_num']
+                            year_sharp += account['month_t_ele_num']
+
+                    account['year_ele_num'] = normal_round(year_total, 2)
+                    account['year_p_ele_num'] = normal_round(year_peak, 2)
+                    account['year_v_ele_num'] = normal_round(year_valley, 2)
+                    account['year_n_ele_num'] = normal_round(year_flat, 2)
+                    account['year_t_ele_num'] = normal_round(year_sharp, 2)
+
+                    # 最近30天日用电列表
+                    if 'daily_bill_list' in account:
+                        daily_list = []
+                        for item in account['daily_bill_list'][:30]:
+                            daily_list.append({
+                                'day': item['day'],
+                                'ele': normal_round(catchFloat(item, 'dayElePq'), 2),
+                                'v_ele': normal_round(catchFloat(item, 'thisVPq'), 2),
+                                'p_ele': normal_round(catchFloat(item, 'errmsg'), 2),
+                                'n_ele': normal_round(catchFloat(item, 'thisNPq'), 2),
+                                't_ele': normal_round(catchFloat(item, 'thisPPq'), 2),
+                            })
+                        daily_list.reverse()
+                        account['recent_30_daily_ele_list'] = daily_list
+                    else:
+                        account['recent_30_daily_ele_list'] = []
+
+                    # 最近12个月月用电列表
                     if 'month_bill_list' in account:
-                        for item in account['month_bill_list']:
-                            if 'month_ele' not in item:
-                                await self.__get_door_mouth_bill(account, item)
-                            if 'daily_ele' not in item:
-                                yr, ms, me = get_month_date_range(item['month'])
-                                e_str = f"{me.year}-{me.month:02d}-{me.day:02d}"
-                                s_str = f"{ms.year}-{ms.month:02d}-{ms.day:02d}"
-                                await self.__get_door_daily_bill(account, int(yr), s_str, e_str, item)
-                            if item['month'].startswith(str(last_month.year)):
-                                current_year_bills.append(item)
-                    account['year_bill_list'] = sorted(current_year_bills, key=lambda x: x['month'], reverse=True)
+                        account['month_bill_list'] = sorted(
+                            account['month_bill_list'], key=lambda x: x['month'], reverse=True
+                        )
+                        monthly_list = []
+                        for item in account['month_bill_list'][:12]:
+                            monthly_list.append({
+                                'month': item['month'],
+                                'cost': normal_round(catchFloat(item, 'monthEleCost'), 2),
+                                'ele': normal_round(catchFloat(item, 'monthEleNum'), 2),
+                                'v_ele': item.get('month_v_ele_num', 0),
+                                'p_ele': item.get('month_p_ele_num', 0),
+                                'n_ele': item.get('month_n_ele_num', 0),
+                                't_ele': item.get('month_t_ele_num', 0),
+                            })
+                        monthly_list.reverse()
+                        account['recent_12_monthly_ele_list'] = monthly_list
+                    else:
+                        account['recent_12_monthly_ele_list'] = []
 
-                if 'yearTotalCost' in account:
-                    account['year_ele_num'] = catchFloat(account['yearTotalCost'], 'totalEleNum')
-                    account['year_ele_cost'] = catchFloat(account['yearTotalCost'], 'totalEleCost')
-                if 'year_ele_num' not in account:
-                    account['year_ele_num'] = 0
-                    account['year_ele_cost'] = 0
+                    account['refresh_time'] = datetime.datetime.strftime(now, '%Y-%m-%d %H:%M:%S')
 
-                # 上月数据
-                last_month_usage = 0
-                last_month_cost = 0
-                last_month_meter = 0
-                last_bill_date = yesterday
-
-                if 'year_bill_list' in account and len(account['year_bill_list']) > 0:
-                    latest_bill = account['year_bill_list'][0]
-                    account['last_month_ele_num'] = catchFloat(latest_bill, 'monthEleNum')
-                    account['last_month_ele_cost'] = catchFloat(latest_bill, 'monthEleCost')
-                    if 'month_ele' in latest_bill:
-                        last_month_meter = latest_bill['month_ele']['month_meter_num']
-                    last_bill_date = datetime.datetime.strptime(latest_bill['month'], '%Y%m')
-
-                if 'last_month_ele_num' not in account:
-                    account['last_month_ele_num'] = 0
-                    account['last_month_ele_cost'] = 0
-
-                account['last_month_meter_num'] = int(last_month_meter)
-
-                # 年度累计（从月账单汇总）
-                year_total = 0
-                year_peak = 0
-                year_valley = 0
-                year_flat = 0
-                year_sharp = 0
-
-                if last_bill_date.month == 12:
-                    year_total = account['month_ele_num']
-                    year_peak = account['month_p_ele_num']
-                    year_valley = account['month_v_ele_num']
-                    year_flat = account['month_n_ele_num']
-                    year_sharp = account['month_t_ele_num']
-                else:
-                    if 'year_bill_list' in account:
-                        for bill in account['year_bill_list']:
-                            year_total += catchFloat(bill, 'monthEleNum')
-                            year_peak += bill.get('month_p_ele_num', 0)
-                            year_valley += bill.get('month_v_ele_num', 0)
-                            year_flat += bill.get('month_n_ele_num', 0)
-                            year_sharp += bill.get('month_t_ele_num', 0)
-                    if has_valid and latest_date.month != last_bill_date.month:
-                        year_total += account['month_ele_num']
-                        year_peak += account['month_p_ele_num']
-                        year_valley += account['month_v_ele_num']
-                        year_flat += account['month_n_ele_num']
-                        year_sharp += account['month_t_ele_num']
-
-                account['year_ele_num'] = normal_round(year_total, 2)
-                account['year_p_ele_num'] = normal_round(year_peak, 2)
-                account['year_v_ele_num'] = normal_round(year_valley, 2)
-                account['year_n_ele_num'] = normal_round(year_flat, 2)
-                account['year_t_ele_num'] = normal_round(year_sharp, 2)
-
-                # 最近30天日用电列表
-                if 'daily_bill_list' in account:
-                    daily_list = []
-                    for item in account['daily_bill_list'][:30]:
-                        daily_list.append({
-                            'day': item['day'],
-                            'ele': normal_round(catchFloat(item, 'dayElePq'), 2),
-                            'v_ele': normal_round(catchFloat(item, 'thisVPq'), 2),
-                            'p_ele': normal_round(catchFloat(item, 'errmsg'), 2),
-                            'n_ele': normal_round(catchFloat(item, 'thisNPq'), 2),
-                            't_ele': normal_round(catchFloat(item, 'thisPPq'), 2),
-                        })
-                    daily_list.reverse()
-                    account['recent_30_daily_ele_list'] = daily_list
-                else:
-                    account['recent_30_daily_ele_list'] = []
-
-                # 最近12个月月用电列表
-                if 'month_bill_list' in account:
-                    account['month_bill_list'] = sorted(
-                        account['month_bill_list'], key=lambda x: x['month'], reverse=True
-                    )
-                    monthly_list = []
-                    for item in account['month_bill_list'][:12]:
-                        monthly_list.append({
-                            'month': item['month'],
-                            'cost': normal_round(catchFloat(item, 'monthEleCost'), 2),
-                            'ele': normal_round(catchFloat(item, 'monthEleNum'), 2),
-                            'v_ele': item.get('month_v_ele_num', 0),
-                            'p_ele': item.get('month_p_ele_num', 0),
-                            'n_ele': item.get('month_n_ele_num', 0),
-                            't_ele': item.get('month_t_ele_num', 0),
-                        })
-                    monthly_list.reverse()
-                    account['recent_12_monthly_ele_list'] = monthly_list
-                else:
-                    account['recent_12_monthly_ele_list'] = []
-
-                account['refresh_time'] = datetime.datetime.strftime(now, '%Y-%m-%d %H:%M:%S')
+                except Exception as account_ex:
+                    cons_no = account.get('consNo_dst', '?')
+                    LOGGER.exception("[数据刷新] 户号 %s 刷新失败: %s", cons_no, account_ex)
+                    continue
 
             await self.save_data()
         except Exception as ex:
-            LOGGER.error(f"刷新数据异常: {ex}")
+            LOGGER.exception("刷新数据异常: %s", ex)
             return 0
 
     def get_door_account_list(self):
