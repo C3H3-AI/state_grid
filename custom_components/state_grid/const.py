@@ -1,12 +1,13 @@
 DOMAIN = "state_grid"
 PACKAGE_NAME = "custom_components.state_grid"
-VERSION = "0.4.2"
+VERSION = "0.5.1"
 VERSION_STORAGE = 12
 STORAGE_KEY = "state_grid.config"
 
-# 流控相关错误码（手机号登录遇限流时，自动降级为邮箱登录）
+# 流控相关错误码（密码登录日额度限制）
 # 11401 = RK001 限流（"网络连接超时（RK001）,请重试！"）
-# 注意：10015/30010/10002 不是流控码，是 token 失效/需重新登录的错误码
+# 注意: RK001是账号维度的限流，不是IP限流
+# 手机号被限流后邮箱账号仍可正常登录（自动降级）
 FLOW_CONTROL_CODES = {11401}
 
 # LLM 验证码识别配置

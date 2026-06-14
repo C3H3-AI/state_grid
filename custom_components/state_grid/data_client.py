@@ -1,5 +1,5 @@
 """
-国家电网数据客户端 - v0.4.2
+国家电网数据客户端 - v0.5.1
 
 基于 bilezhou/state_grid 原版修改，主要变更:
 1. 支持点选验证码（LLM 视觉大模型识别）
@@ -7,6 +7,10 @@
 3. 自动检测验证码类型
 4. 增加 LLM 配置（API Key, Base URL, Model）
 5. 优化错误处理和重试逻辑
+6. v0.5.0: 新增短信验证码登录（绕过RK001密码登录日限额）
+7. v0.5.0: RK001冷却机制（密码登录日额度用完后不再无效重试）
+8. v0.5.1: 修复邮箱降级未被调用的问题 — RK001是账号维度的限流，
+   手机号限流后邮箱仍可登录，遇到RK001时自动降级到邮箱登录
 """
 
 import hashlib
@@ -55,12 +59,16 @@ get_door_bill_api = '/osg-open-bc0001/member/c01/f02'
 get_door_ladder_api = '/osg-open-bc0001/member/c04/f03'
 get_door_daily_bill_api = '/osg-web0004/member/c24/f01'
 
-sessionIdControlApiList = [verify_password_api, get_verify_code_api, click_card_api]
+# ─── 短信验证码登录 API ───
+send_sms_code_api = '/osg-open-uc0001/member/c8/f04'
+verify_sms_code_api = '/osg-uc0013/member/c4/f02'
+
+sessionIdControlApiList = [verify_password_api, get_verify_code_api, click_card_api, send_sms_code_api, verify_sms_code_api]
 keyCodeControlApiList = [
     verify_password_api, get_verify_code_api, get_request_authorize_api,
     get_web_token_api, get_door_number_api, get_door_balance_api,
     get_door_bill_api, get_door_ladder_api, get_door_daily_bill_api,
-    click_card_api
+    click_card_api, send_sms_code_api, verify_sms_code_api
 ]
 authControlApiList = [
     get_door_number_api, get_door_balance_api, get_door_bill_api,
@@ -380,8 +388,12 @@ class StateGridDataClient:
     llm_base_url = "https://ark.cn-beijing.volces.com/api/v3"
     llm_model = "doubao-seed-2-0-pro-260215"
 
-    # 备用邮箱（流控降级用）
+    # 备用邮箱（非RK001场景降级用）
     email_account = ""
+
+    # RK001 冷却时间戳（手机号密码登录日额度用完后，避免无效重试）
+    # 注意：RK001是账号维度的限流，邮箱账号不受手机号的RK001限制
+    _rk001_cooldown_until = 0.0
 
     def __init__(self, hass, config=None):
         self.hass = hass
@@ -408,6 +420,8 @@ class StateGridDataClient:
                 self.llm_model = config.get('llm_model', 'doubao-seed-2-0-pro-260215')
                 # 备用邮箱
                 self.email_account = config.get('email_account', '')
+                # RK001 冷却
+                self._rk001_cooldown_until = config.get('_rk001_cooldown_until', 0.0)
             except Exception as ex:
                 LOGGER.error(f"初始化配置失败: {ex}")
 
@@ -440,6 +454,8 @@ class StateGridDataClient:
         data['llm_model'] = self.llm_model
         # 保存备用邮箱
         data['email_account'] = self.email_account
+        # 保存 RK001 冷却时间
+        data['_rk001_cooldown_until'] = self._rk001_cooldown_until
         await async_save_to_store(self.hass, 'state_grid.config', data)
 
     def encrypt_post_data(self, data):
@@ -481,25 +497,22 @@ class StateGridDataClient:
             return result
         code = result['code']
 
-        # 流控错误：尝试邮箱降级登录
+        # 流控错误 (RK001): 当前账号密码登录日额度用完
+        # RK001 是账号维度的限流，手机号限流后邮箱仍可登录
         if code in FLOW_CONTROL_CODES or self._is_flow_control_error(result):
-            if self.email_account:
-                LOGGER.warning("业务API遇流控(code=%s)，尝试邮箱降级登录: %s", code, self.email_account)
-                email_result = await self._login_with_email_fallback(self.password, retry=3)
-                if 'errcode' in email_result and email_result['errcode'] == 0:
-                    self.need_login = False
-                    self.shown_notification = False
-                    try:
-                        await self.save_data()
-                    except Exception as save_ex:
-                        LOGGER.exception("邮箱降级登录成功但保存数据失败: %s", save_ex)
+            # 先尝试邮箱降级登录
+            if self.email_account and not self.is_rk001_cooldown():
+                LOGGER.info("[RK001] 当前账号被限流，尝试邮箱降级登录...")
+                login_result = await self.__try_email_fallback_login()
+                if login_result:
+                    # 邮箱登录成功，重新请求数据
                     return await self.__fetch(api, data)
-                else:
-                    LOGGER.error("邮箱降级登录也失败了，等待下次轮询重试")
-            else:
-                LOGGER.warning("业务API遇流控(code=%s)且未配置邮箱，无法降级", code)
+            # 邮箱降级也失败，设置冷却
+            self._set_rk001_cooldown()
             self.need_login = True
-            self._show_token_notification()
+            self._show_token_notification(
+                msg='密码登录日额度已用完(RK001)，邮箱降级也失败，请等待明日0点自动重试'
+            )
             return result
 
         # 其他需要重新登录的错误码
@@ -526,6 +539,18 @@ class StateGridDataClient:
         return False
 
     async def __try_password_login(self):
+        # 如果在 RK001 冷却期内，跳过手机号密码登录尝试
+        if self.is_rk001_cooldown():
+            # 冷却期内仍可尝试邮箱降级
+            if self.email_account:
+                LOGGER.info("[RK001冷却] 手机号在冷却期，尝试邮箱降级登录...")
+                login_result = await self.__try_email_fallback_login()
+                if login_result:
+                    return
+            else:
+                LOGGER.warning("[RK001冷却] 跳过密码登录尝试，未配置邮箱降级，请等待明日0点")
+            return
+
         # 先用当前账号（手机号）尝试登录
         result = await self.password_login(self.account, self.password, True, 3)
         if 'errcode' in result and result['errcode'] == 0:
@@ -536,17 +561,16 @@ class StateGridDataClient:
             except Exception as save_ex:
                 LOGGER.exception("手机号登录成功但保存数据失败: %s", save_ex)
             return
-        # 手机号登录失败，如果配置了邮箱，尝试邮箱降级
-        if self.email_account and self._is_flow_control_error(result):
-            LOGGER.warning("手机号登录遇流控，__try_password_login 降级为邮箱: %s", self.email_account)
-            result = await self._login_with_email_fallback(self.password, retry=3)
-            if 'errcode' in result and result['errcode'] == 0:
-                self.need_login = False
-                self.shown_notification = False
-                try:
-                    await self.save_data()
-                except Exception as save_ex:
-                    LOGGER.exception("邮箱降级登录成功但保存数据失败: %s", save_ex)
+
+        # 如果手机号命中RK001，尝试邮箱降级
+        if self._is_flow_control_error(result):
+            LOGGER.warning("[RK001] 手机号被限流，尝试邮箱降级登录...")
+            login_result = await self.__try_email_fallback_login()
+            if login_result:
+                return
+            # 邮箱降级也失败，设置冷却
+            self._set_rk001_cooldown()
+            return
 
     async def __fetch(self, api, data, header=None):
         self.timestamp = int(time.time() * 1000)
@@ -982,7 +1006,18 @@ class StateGridDataClient:
         return False
 
     async def password_login(self, account, password, encode=False, retry=0):
-        """账号密码登录，手机号优先，遇流控自动降级邮箱登录。"""
+        """账号密码登录。
+
+        注意: RK001(11401)是账号维度的密码登录日额度限制。
+        手机号被限流后，邮箱账号仍可正常登录（自动降级）。
+        """
+        # RK001 冷却期内，不再尝试手机号密码登录
+        # （但不阻止邮箱降级登录，邮箱不受手机号的RK001限制）
+        if self.is_rk001_cooldown() and account == self.account:
+            LOGGER.warning("[RK001冷却] 跳过手机号密码登录，冷却至 %s",
+                           time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self._rk001_cooldown_until)))
+            return {'errcode': 1, 'errmsg': '手机号密码登录日额度已用完(RK001)'}
+
         pwd = password
         if not encode:
             pwd = hashlib.md5(pwd.encode()).hexdigest().upper()
@@ -990,19 +1025,19 @@ class StateGridDataClient:
         # 步骤 1: 获取加密密钥
         result = await self.__get_request_key()
         if result.get('errcode') != 0:
-            # 获取密钥阶段遇流控，尝试邮箱降级
-            if self._is_flow_control_error(result) and self.email_account:
-                LOGGER.warning("获取密钥遇流控，降级为邮箱登录: %s", self.email_account)
-                return await self._login_with_email_fallback(pwd, retry)
+            # 获取密钥阶段遇流控，设置冷却
+            if self._is_flow_control_error(result):
+                self._set_rk001_cooldown()
+                return {'errcode': 1, 'errmsg': '获取密钥遇流控(RK001)，密码登录日额度已用完'}
             return result
 
         # 步骤 2: 获取验证码
         result = await self.__get_pass_verify_code(account, pwd)
         if result.get('errcode') != 0:
-            # 获取验证码阶段遇流控，尝试邮箱降级
-            if self._is_flow_control_error(result) and self.email_account:
-                LOGGER.warning("获取验证码遇流控，降级为邮箱登录: %s", self.email_account)
-                return await self._login_with_email_fallback(pwd, retry)
+            # 获取验证码阶段遇流控，设置冷却
+            if self._is_flow_control_error(result):
+                self._set_rk001_cooldown()
+                return {'errcode': 1, 'errmsg': '获取验证码遇流控(RK001)，密码登录日额度已用完'}
             return result
 
         # 步骤 3: 解算验证码
@@ -1067,10 +1102,10 @@ class StateGridDataClient:
             # 滑块验证码：使用 f06 + complexSliderType=blockPuzzle
             result = await self.__verify_password(account, pwd, verify_code, self.ticket, captcha_type='slider')
         if result.get('errcode') != 0:
-            # 验证阶段遇流控，尝试邮箱降级
-            if self._is_flow_control_error(result) and self.email_account:
-                LOGGER.warning("验证登录遇流控，降级为邮箱登录: %s", self.email_account)
-                return await self._login_with_email_fallback(pwd, retry)
+            # 验证阶段遇流控，设置冷却（邮箱降级由调用方 __try_password_login 处理）
+            if self._is_flow_control_error(result):
+                self._set_rk001_cooldown()
+                return {'errcode': 1, 'errmsg': '验证登录遇流控(RK001)，密码登录日额度已用完'}
             if retry <= 0:
                 return result
             LOGGER.error('账号密码登录失败，将重试！')
@@ -1082,22 +1117,65 @@ class StateGridDataClient:
         self.password = pwd
         return await self.__get_token()
 
+    async def __try_email_fallback_login(self):
+        """尝试邮箱降级登录，成功返回True，失败返回False。"""
+        if not self.email_account:
+            LOGGER.warning("[邮箱降级] 未配置备用邮箱，无法降级")
+            return False
+
+        pwd = self.password
+        if not pwd:
+            LOGGER.warning("[邮箱降级] 密码为空，无法降级")
+            return False
+
+        try:
+            result = await self._login_with_email_fallback(pwd, retry=2)
+            if result.get('errcode') == 0:
+                self.need_login = False
+                self.shown_notification = False
+                LOGGER.info("[邮箱降级] 登录成功! 使用邮箱 %s 替代手机号登录", self.email_account)
+                try:
+                    await self.save_data()
+                except Exception as save_ex:
+                    LOGGER.exception("邮箱登录成功但保存数据失败: %s", save_ex)
+                return True
+            else:
+                errmsg = result.get('errmsg', '')
+                LOGGER.warning("[邮箱降级] 登录失败: %s", errmsg)
+                if self._is_flow_control_error(result):
+                    LOGGER.warning("[邮箱降级] 邮箱账号也被限流(RK001)，设置冷却")
+                    self._set_rk001_cooldown()
+                return False
+        except Exception as ex:
+            LOGGER.exception("[邮箱降级] 登录异常: %s (type=%s)", ex, type(ex).__name__)
+            return False
+
     async def _login_with_email_fallback(self, pwd, retry=0):
-        """使用备用邮箱登录（流控降级）。"""
+        """使用备用邮箱登录（流控降级）。
+
+        RK001是账号维度的限流，手机号被限流后邮箱仍可正常登录。
+        此方法在手机号遇到RK001时自动调用，无需用户干预。
+        """
         if not self.email_account:
             return {'errcode': 1, 'errmsg': '未配置备用邮箱，无法降级登录'}
         LOGGER.info("=== 流控降级：使用邮箱 %s 登录 ===", self.email_account)
         try:
-            # 步骤1: 获取密钥
+            # 步骤1: 获取密钥（邮箱登录使用新的密钥）
             result = await self.__get_request_key()
             if result.get('errcode') != 0:
                 LOGGER.warning("[邮箱降级] 获取密钥失败: %s", result.get('errmsg', ''))
+                if self._is_flow_control_error(result):
+                    self._set_rk001_cooldown()
+                    return {'errcode': 1, 'errmsg': '邮箱降级：获取密钥遇流控(RK001)'}
                 return result
 
             # 步骤2: 获取验证码
             result = await self.__get_pass_verify_code(self.email_account, pwd)
             if result.get('errcode') != 0:
                 LOGGER.warning("[邮箱降级] 获取验证码失败: %s", result.get('errmsg', ''))
+                if self._is_flow_control_error(result):
+                    self._set_rk001_cooldown()
+                    return {'errcode': 1, 'errmsg': '邮箱降级：获取验证码遇流控(RK001)'}
                 return result
 
             # 步骤3: 解算验证码（独立 try-except，捕获 httpx/openai 等库的内部异常）
@@ -1157,14 +1235,19 @@ class StateGridDataClient:
 
             if result.get('errcode') != 0:
                 LOGGER.warning("[邮箱降级] 验证失败: %s", result.get('errmsg', ''))
+                if self._is_flow_control_error(result):
+                    self._set_rk001_cooldown()
+                    return {'errcode': 1, 'errmsg': '邮箱降级：验证登录遇流控(RK001)，邮箱也被限流'}
                 if retry <= 0:
                     return result
                 LOGGER.warning('[邮箱降级] 登录失败，重试...')
                 return await self._login_with_email_fallback(pwd, retry - 1)
 
             # 步骤5: 获取 token
+            # 注意：登录成功后 self.account 改为邮箱，但后续数据查询仍使用同一账号体系
             self.account = self.email_account
             self.password = pwd
+            LOGGER.info("[邮箱降级] 邮箱登录验证通过，正在获取token...")
             return await self.__get_token()
 
         except Exception as ex:
@@ -1186,14 +1269,142 @@ class StateGridDataClient:
             # 保存失败不影响登录成功
         return {'errcode': 0}
 
-    def _show_token_notification(self):
+    def _show_token_notification(self, msg=None):
         if self.shown_notification:
             return
         self.shown_notification = True
         import persistent_notification
-        msg = '国家电网登录失败，将在下个轮询重试'
+        if msg is None:
+            msg = '国家电网登录失败，将在下个轮询重试'
         persistent_notification.create(self.hass, msg, title='国家电网 - 登录失败')
         LOGGER.error(msg)
+
+    # ─── 短信验证码登录 ───
+
+    async def send_sms_code(self, phone):
+        """发送短信验证码到手机。
+
+        这是短信验证码登录的第一步。短信登录不受RK001密码登录日限额限制。
+        由 config_flow 调用，用户在HA界面输入手机号后触发。
+
+        参数:
+            phone: 手机号
+
+        返回:
+            {'errcode': 0} 成功，用户应输入收到的验证码
+            {'errcode': 1, 'errmsg': '...'} 失败
+        """
+        self.phone = phone
+
+        # 步骤1: 获取加密密钥
+        result = await self.__get_request_key()
+        if result.get('errcode') != 0:
+            LOGGER.warning("[短信登录] 获取密钥失败: %s", result.get('errmsg', ''))
+            return result
+
+        # 步骤2: 发送短信验证码
+        params = {
+            'uscInfo': {
+                'devciceIp': '', 'tenant': 'state_grid',
+                'member': '0902', 'devciceId': '',
+            },
+            'quInfo': {
+                'sendType': '0',
+                'account': phone,
+                'businessType': 'login',
+                'accountType': '',
+            },
+            'Channels': 'web',
+        }
+
+        result = await self.__fetch(send_sms_code_api, params)
+        msg = self.handle_request_result_message('send_sms_code_api', result)
+
+        if 'code' in result and str(result['code']) == '1':
+            if (result.get('data') and result['data'].get('srvrt')
+                    and result['data']['srvrt'].get('resultCode') == '0000'):
+                self.codeKey = result['data']['bizrt']['codeKey']
+                LOGGER.info("[短信登录] 验证码已发送到 %s, codeKey=%s...", phone, self.codeKey[:8] if self.codeKey else 'None')
+                return {'errcode': 0}
+
+        raw_code = result.get('code')
+        LOGGER.error("[短信登录] 发送验证码失败: code=%s, msg=%s", raw_code, msg)
+        return {'errcode': 1, 'errmsg': msg, 'raw_code': raw_code}
+
+    async def verify_sms_code(self, sms_code):
+        """验证短信验证码完成登录。
+
+        这是短信验证码登录的第二步。用户在HA界面输入收到的验证码后触发。
+
+        参数:
+            sms_code: 6位短信验证码
+
+        返回:
+            {'errcode': 0} 登录成功
+            {'errcode': 1, 'errmsg': '...'} 登录失败
+        """
+        if not self.phone:
+            return {'errcode': 1, 'errmsg': '请先发送短信验证码'}
+        if not self.codeKey:
+            return {'errcode': 1, 'errmsg': 'codeKey 为空，请重新发送短信验证码'}
+
+        # 步骤3: 验证短信验证码
+        params = {
+            'uscInfo': {
+                'devciceIp': '', 'tenant': 'state_grid',
+                'member': '0902', 'devciceId': '',
+            },
+            'quInfo': {
+                'account': self.phone,
+                'businessType': 'login',
+                'code': sms_code,
+                'optSys': 'ios',
+                'pushId': '00000',
+                'codeKey': self.codeKey,
+            },
+            'Channels': 'web',
+        }
+
+        result = await self.__fetch(verify_sms_code_api, params)
+        msg = self.handle_request_result_message('verify_sms_code_api', result)
+
+        if ('srvrt' in result and 'resultCode' in result['srvrt']
+                and result['srvrt']['resultCode'] == '0000'):
+            self.token = result['bizrt']['token']
+            self.userInfo = result['bizrt']['userInfo'][0]
+            self.account = self.phone
+            # 短信登录成功后，清除RK001冷却
+            self._rk001_cooldown_until = 0.0
+            LOGGER.info("[短信登录] 验证成功! token=%s...", self.token[:16] if self.token else 'None')
+            return await self.__get_token()
+
+        LOGGER.error("[短信登录] 验证失败: %s", msg)
+        return {'errcode': 1, 'errmsg': msg}
+
+    def is_rk001_cooldown(self):
+        """检查当前是否处于 RK001 冷却期。
+
+        RK001 = 密码登录日额度用完。冷却期间不应再尝试密码登录，
+        避免浪费剩余额度或触发更严厉的限制。
+
+        冷却策略: RK001命中后，设置冷却到当天 23:59:59（北京时间），
+        即第二天0点后自动解除。
+        """
+        if self._rk001_cooldown_until <= 0:
+            return False
+        now = time.time()
+        return now < self._rk001_cooldown_until
+
+    def _set_rk001_cooldown(self):
+        """设置 RK001 冷却到当天 23:59:59（北京时间）。"""
+        import datetime as _dt
+        now = _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=8)))
+        end_of_day = now.replace(hour=23, minute=59, second=59, microsecond=0)
+        self._rk001_cooldown_until = end_of_day.timestamp()
+        LOGGER.warning(
+            "[RK001冷却] 密码登录日额度已用完，冷却至 %s（北京时间），期间不再尝试密码登录",
+            end_of_day.strftime('%Y-%m-%d %H:%M:%S'),
+        )
 
     # ─── 数据获取 ───
 
