@@ -1,5 +1,5 @@
 """
-国家电网数据客户端 - v0.5.1
+国家电网数据客户端 - v0.5.2
 
 基于 bilezhou/state_grid 原版修改，主要变更:
 1. 支持点选验证码（LLM 视觉大模型识别）
@@ -7,10 +7,10 @@
 3. 自动检测验证码类型
 4. 增加 LLM 配置（API Key, Base URL, Model）
 5. 优化错误处理和重试逻辑
-6. v0.5.0: 新增短信验证码登录（绕过RK001密码登录日限额）
-7. v0.5.0: RK001冷却机制（密码登录日额度用完后不再无效重试）
-8. v0.5.1: 修复邮箱降级未被调用的问题 — RK001是账号维度的限流，
+6. v0.5.0: RK001冷却机制（密码登录日额度用完后不再无效重试）
+7. v0.5.1: 修复邮箱降级未被调用的问题 — RK001是账号维度的限流，
    手机号限流后邮箱仍可登录，遇到RK001时自动降级到邮箱登录
+8. v0.5.2: 移除短信验证码登录（自动化系统无法手动输入验证码）
 """
 
 import hashlib
@@ -59,16 +59,13 @@ get_door_bill_api = '/osg-open-bc0001/member/c01/f02'
 get_door_ladder_api = '/osg-open-bc0001/member/c04/f03'
 get_door_daily_bill_api = '/osg-web0004/member/c24/f01'
 
-# ─── 短信验证码登录 API ───
-send_sms_code_api = '/osg-open-uc0001/member/c8/f04'
-verify_sms_code_api = '/osg-uc0013/member/c4/f02'
 
-sessionIdControlApiList = [verify_password_api, get_verify_code_api, click_card_api, send_sms_code_api, verify_sms_code_api]
+sessionIdControlApiList = [verify_password_api, get_verify_code_api, click_card_api]
 keyCodeControlApiList = [
     verify_password_api, get_verify_code_api, get_request_authorize_api,
     get_web_token_api, get_door_number_api, get_door_balance_api,
     get_door_bill_api, get_door_ladder_api, get_door_daily_bill_api,
-    click_card_api, send_sms_code_api, verify_sms_code_api
+    click_card_api
 ]
 authControlApiList = [
     get_door_number_api, get_door_balance_api, get_door_bill_api,
@@ -1278,108 +1275,6 @@ class StateGridDataClient:
             msg = '国家电网登录失败，将在下个轮询重试'
         persistent_notification.create(self.hass, msg, title='国家电网 - 登录失败')
         LOGGER.error(msg)
-
-    # ─── 短信验证码登录 ───
-
-    async def send_sms_code(self, phone):
-        """发送短信验证码到手机。
-
-        这是短信验证码登录的第一步。短信登录不受RK001密码登录日限额限制。
-        由 config_flow 调用，用户在HA界面输入手机号后触发。
-
-        参数:
-            phone: 手机号
-
-        返回:
-            {'errcode': 0} 成功，用户应输入收到的验证码
-            {'errcode': 1, 'errmsg': '...'} 失败
-        """
-        self.phone = phone
-
-        # 步骤1: 获取加密密钥
-        result = await self.__get_request_key()
-        if result.get('errcode') != 0:
-            LOGGER.warning("[短信登录] 获取密钥失败: %s", result.get('errmsg', ''))
-            return result
-
-        # 步骤2: 发送短信验证码
-        params = {
-            'uscInfo': {
-                'devciceIp': '', 'tenant': 'state_grid',
-                'member': '0902', 'devciceId': '',
-            },
-            'quInfo': {
-                'sendType': '0',
-                'account': phone,
-                'businessType': 'login',
-                'accountType': '',
-            },
-            'Channels': 'web',
-        }
-
-        result = await self.__fetch(send_sms_code_api, params)
-        msg = self.handle_request_result_message('send_sms_code_api', result)
-
-        if 'code' in result and str(result['code']) == '1':
-            if (result.get('data') and result['data'].get('srvrt')
-                    and result['data']['srvrt'].get('resultCode') == '0000'):
-                self.codeKey = result['data']['bizrt']['codeKey']
-                LOGGER.info("[短信登录] 验证码已发送到 %s, codeKey=%s...", phone, self.codeKey[:8] if self.codeKey else 'None')
-                return {'errcode': 0}
-
-        raw_code = result.get('code')
-        LOGGER.error("[短信登录] 发送验证码失败: code=%s, msg=%s", raw_code, msg)
-        return {'errcode': 1, 'errmsg': msg, 'raw_code': raw_code}
-
-    async def verify_sms_code(self, sms_code):
-        """验证短信验证码完成登录。
-
-        这是短信验证码登录的第二步。用户在HA界面输入收到的验证码后触发。
-
-        参数:
-            sms_code: 6位短信验证码
-
-        返回:
-            {'errcode': 0} 登录成功
-            {'errcode': 1, 'errmsg': '...'} 登录失败
-        """
-        if not self.phone:
-            return {'errcode': 1, 'errmsg': '请先发送短信验证码'}
-        if not self.codeKey:
-            return {'errcode': 1, 'errmsg': 'codeKey 为空，请重新发送短信验证码'}
-
-        # 步骤3: 验证短信验证码
-        params = {
-            'uscInfo': {
-                'devciceIp': '', 'tenant': 'state_grid',
-                'member': '0902', 'devciceId': '',
-            },
-            'quInfo': {
-                'account': self.phone,
-                'businessType': 'login',
-                'code': sms_code,
-                'optSys': 'ios',
-                'pushId': '00000',
-                'codeKey': self.codeKey,
-            },
-            'Channels': 'web',
-        }
-
-        result = await self.__fetch(verify_sms_code_api, params)
-        msg = self.handle_request_result_message('verify_sms_code_api', result)
-
-        if ('srvrt' in result and 'resultCode' in result['srvrt']
-                and result['srvrt']['resultCode'] == '0000'):
-            self.token = result['bizrt']['token']
-            self.userInfo = result['bizrt']['userInfo'][0]
-            self.account = self.phone
-            # 短信登录成功后，清除RK001冷却
-            self._rk001_cooldown_until = 0.0
-            LOGGER.info("[短信登录] 验证成功! token=%s...", self.token[:16] if self.token else 'None')
-            return await self.__get_token()
-
-        LOGGER.error("[短信登录] 验证失败: %s", msg)
-        return {'errcode': 1, 'errmsg': msg}
 
     def is_rk001_cooldown(self):
         """检查当前是否处于 RK001 冷却期。
