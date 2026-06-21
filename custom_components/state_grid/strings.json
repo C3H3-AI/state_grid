@@ -29,11 +29,13 @@
     "step": {
       "init": {
         "title": "国家电网 - 选项",
-        "description": "修改 LLM 配置",
+        "description": "修改 LLM 配置、备用邮箱和刷新间隔（留空表示不修改）",
         "data": {
-          "llm_api_key": "LLM API Key",
+          "llm_api_key": "LLM API Key（留空不修改）",
           "llm_base_url": "LLM Base URL",
-          "llm_model": "LLM 模型"
+          "llm_model": "LLM 模型",
+          "email_account": "备用邮箱（流控降级用）",
+          "refresh_interval": "刷新间隔（小时，12-48）"
         }
       }
     }

@@ -154,14 +154,70 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_init(self, user_input=None):
         """选项配置入口。"""
-        if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+        # 当前配置：优先 entry.options，其次 entry.data
+        current = {**(self.config_entry.data or {}), **(self.config_entry.options or {})}
 
+        if user_input is not None:
+            # 合并新配置（空值表示不修改，保留原值）
+            new_data = {}
+            for key in ("llm_api_key", "llm_base_url", "llm_model", "email_account"):
+                val = user_input.get(key, "").strip() if isinstance(user_input.get(key, ""), str) else ""
+                if val:
+                    new_data[key] = val
+                elif key in current:
+                    new_data[key] = current[key]
+
+            # 刷新间隔（小时）
+            refresh_interval = user_input.get("refresh_interval")
+            if refresh_interval:
+                new_data["refresh_interval"] = max(12, int(refresh_interval))
+
+            # 实时更新运行中的 data_client
+            data_client = self.hass.data.get(DOMAIN)
+            if data_client:
+                if "llm_api_key" in new_data:
+                    data_client.llm_api_key = new_data["llm_api_key"]
+                if "llm_base_url" in new_data:
+                    data_client.llm_base_url = new_data["llm_base_url"]
+                if "llm_model" in new_data:
+                    data_client.llm_model = new_data["llm_model"]
+                if "email_account" in new_data:
+                    data_client.email_account = new_data["email_account"]
+                if "refresh_interval" in new_data:
+                    data_client.refresh_interval = new_data["refresh_interval"]
+                # 重新配置 LLM 客户端
+                if data_client.llm_api_key:
+                    click_captcha_solver.configure_llm(
+                        data_client.llm_api_key,
+                        data_client.llm_base_url,
+                        data_client.llm_model,
+                    )
+
+            return self.async_create_entry(title="", data=new_data)
+
+        # 构建表单，给每个字段填上当前值作为默认值（避免 500）
         data_schema = vol.Schema(
             {
-                vol.Optional("llm_api_key"): selector({"text": {"type": "password"}}),
-                vol.Optional("llm_base_url"): selector({"text": {"type": "text"}}),
-                vol.Optional("llm_model"): selector({"text": {"type": "text"}}),
+                vol.Optional(
+                    "llm_api_key",
+                    default=current.get("llm_api_key", ""),
+                ): selector({"text": {"type": "password"}}),
+                vol.Optional(
+                    "llm_base_url",
+                    default=current.get("llm_base_url", LLM_BASE_URL),
+                ): selector({"text": {"type": "text"}}),
+                vol.Optional(
+                    "llm_model",
+                    default=current.get("llm_model", LLM_MODEL),
+                ): selector({"text": {"type": "text"}}),
+                vol.Optional(
+                    "email_account",
+                    default=current.get("email_account", ""),
+                ): selector({"text": {"type": "text"}}),
+                vol.Optional(
+                    "refresh_interval",
+                    default=current.get("refresh_interval", 12),
+                ): selector({"number": {"min": 12, "max": 48, "step": 1, "mode": "box"}}),
             }
         )
         return self.async_show_form(step_id="init", data_schema=data_schema)

@@ -14,17 +14,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     config = await async_load_from_store(hass, "state_grid.config") or None
     data_client = StateGridDataClient(hass=hass, config=config)
 
-    # 如果 entry.data 中有 LLM 配置，优先使用
-    if entry.data:
-        llm_key = entry.data.get("llm_api_key", "")
-        if llm_key and not data_client.llm_api_key:
+    # 配置优先级：entry.options > entry.data > 存储中的 config
+    # entry.options 是用户在"配置"按钮中修改的最新值
+    merged = {**(entry.data or {}), **(entry.options or {})}
+
+    if merged:
+        llm_key = merged.get("llm_api_key", "")
+        if llm_key:
             data_client.llm_api_key = llm_key
-            data_client.llm_base_url = entry.data.get("llm_base_url", data_client.llm_base_url)
-            data_client.llm_model = entry.data.get("llm_model", data_client.llm_model)
-        # 备用邮箱（流控降级用）
-        email_account = entry.data.get("email_account", "")
-        if email_account:
-            data_client.email_account = email_account
+        if "llm_base_url" in merged:
+            data_client.llm_base_url = merged["llm_base_url"]
+        if "llm_model" in merged:
+            data_client.llm_model = merged["llm_model"]
+        if "email_account" in merged:
+            data_client.email_account = merged["email_account"]
+        if "refresh_interval" in merged:
+            try:
+                data_client.refresh_interval = max(12, int(merged["refresh_interval"]))
+            except (ValueError, TypeError):
+                pass
 
     # 确保至少有 LLM 配置（从 entry.data 或 config 中获取）
     if data_client.llm_api_key:
@@ -45,6 +53,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok:
         hass.data.pop(DOMAIN, None)
     return unload_ok
+
+
+async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Options 更新时触发，重新加载集成使配置立即生效。"""
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
