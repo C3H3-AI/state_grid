@@ -150,7 +150,15 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     """集成选项：可以修改 LLM 配置和刷新间隔。"""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = config_entry
+        # 兼容不同 HA 版本：
+        # - 新版 HA：OptionsFlow 基类已把 config_entry 设为只读 property（无 setter），
+        #   必须调用 super().__init__(config_entry) 让基类自己存储
+        # - 旧版 HA：OptionsFlow.__init__() 不接受参数，自己赋值 self.config_entry
+        try:
+            super().__init__(config_entry)
+        except TypeError:
+            # 旧版 HA：基类 __init__ 不接受参数
+            self.config_entry = config_entry
 
     async def async_step_init(self, user_input=None):
         """选项配置入口。"""
