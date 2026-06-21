@@ -2,6 +2,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.const import Platform
 from .const import DOMAIN
+from .utils.logger import LOGGER
 from .utils.store import async_load_from_store
 from .data_client import StateGridDataClient
 from . import click_captcha_solver
@@ -58,6 +59,20 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Options 更新时触发，重新加载集成使配置立即生效。"""
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """ConfigEntry 版本迁移。
+
+    HA 在打开 options 配置页时，如果 entry.version < config_flow.VERSION，
+    会调用此方法。如果不实现，HA 会报错 500。
+    """
+    LOGGER.info("ConfigEntry 迁移: 版本 %s -> %s", entry.version, 12)
+    # 我们不需要做任何数据结构变换，直接升级版本号即可
+    # 因为所有字段都是 Optional，旧版本数据能兼容新版本
+    if entry.version < 12:
+        hass.config_entries.async_update_entry(entry, version=12)
+    return True
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:

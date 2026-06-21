@@ -158,19 +158,23 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         current = {**(self.config_entry.data or {}), **(self.config_entry.options or {})}
 
         if user_input is not None:
-            # 合并新配置（空值表示不修改，保留原值）
+            # 合并新配置（空字符串表示不修改，保留原值）
             new_data = {}
             for key in ("llm_api_key", "llm_base_url", "llm_model", "email_account"):
-                val = user_input.get(key, "").strip() if isinstance(user_input.get(key, ""), str) else ""
+                raw_val = user_input.get(key)
+                val = raw_val.strip() if isinstance(raw_val, str) else ""
                 if val:
                     new_data[key] = val
-                elif key in current:
+                elif key in current and current[key]:
                     new_data[key] = current[key]
 
             # 刷新间隔（小时）
             refresh_interval = user_input.get("refresh_interval")
             if refresh_interval:
-                new_data["refresh_interval"] = max(12, int(refresh_interval))
+                try:
+                    new_data["refresh_interval"] = max(12, int(refresh_interval))
+                except (ValueError, TypeError):
+                    pass
 
             # 实时更新运行中的 data_client
             data_client = self.hass.data.get(DOMAIN)
@@ -195,29 +199,48 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
             return self.async_create_entry(title="", data=new_data)
 
-        # 构建表单，给每个字段填上当前值作为默认值（避免 500）
+        # 安全提取默认值（处理 None、非字符串、非数字等情况）
+        def _str(key, fallback=""):
+            v = current.get(key)
+            if v is None:
+                return fallback
+            if isinstance(v, str):
+                return v
+            return str(v)
+
+        def _int(key, fallback=12):
+            v = current.get(key)
+            if v is None:
+                return fallback
+            try:
+                return max(12, int(v))
+            except (ValueError, TypeError):
+                return fallback
+
+        # 构建表单：所有字段都给安全的默认值
         data_schema = vol.Schema(
             {
                 vol.Optional(
                     "llm_api_key",
-                    default=current.get("llm_api_key", ""),
+                    default="",
                 ): selector({"text": {"type": "password"}}),
                 vol.Optional(
                     "llm_base_url",
-                    default=current.get("llm_base_url", LLM_BASE_URL),
+                    default=_str("llm_base_url", LLM_BASE_URL),
                 ): selector({"text": {"type": "text"}}),
                 vol.Optional(
                     "llm_model",
-                    default=current.get("llm_model", LLM_MODEL),
+                    default=_str("llm_model", LLM_MODEL),
                 ): selector({"text": {"type": "text"}}),
                 vol.Optional(
                     "email_account",
-                    default=current.get("email_account", ""),
+                    default=_str("email_account", ""),
                 ): selector({"text": {"type": "text"}}),
                 vol.Optional(
                     "refresh_interval",
-                    default=current.get("refresh_interval", 12),
-                ): selector({"number": {"min": 12, "max": 48, "step": 1, "mode": "box"}}),
+                    default=_int("refresh_interval", 12),
+                    description="刷新间隔（小时，12-48）",
+                ): vol.All(vol.Coerce(int), vol.Clamp(min=12, max=48)),
             }
         )
         return self.async_show_form(step_id="init", data_schema=data_schema)
