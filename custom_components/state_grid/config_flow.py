@@ -179,7 +179,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             if refresh_interval:
                 try:
                     hours = int(str(refresh_interval).strip())
-                    new_data["refresh_interval"] = max(12, min(48, hours))
+                    new_data["refresh_interval"] = max(1, min(48, hours))
                 except (ValueError, TypeError):
                     pass
 
@@ -237,7 +237,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional(
                     "refresh_interval",
                     default=_str("refresh_interval", "12"),
-                    description="刷新间隔（小时，填 12-48 之间的整数）",
+                    description="刷新间隔（小时，填 1-48 之间的整数）",
                 ): selector({"text": {"type": "text"}}),
             }
         )
