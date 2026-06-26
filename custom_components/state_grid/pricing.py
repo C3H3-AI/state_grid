@@ -139,3 +139,20 @@ def _calc_ladder_cost(
             cost = first_remain * price_1 + second_part * price_2 + third_part * price_3
 
     return cost
+
+
+def get_account_pricing(pricing_config: dict, account_id: str) -> dict:
+    """Get pricing config for a specific account.
+    
+    If pricing_config has per-account keys (like '3305820502430'),
+    return the config for the given account_id.
+    Otherwise return pricing_config itself (flat/shared config).
+    """
+    if not pricing_config:
+        return {}
+    # Check if this is per-account config (keys look like account IDs)
+    first_key = next(iter(pricing_config), None)
+    if first_key and isinstance(first_key, str) and first_key.isdigit() and len(first_key) > 10:
+        return pricing_config.get(account_id, {})
+    # Flat config (backward compatible)
+    return pricing_config
