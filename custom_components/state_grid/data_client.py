@@ -254,7 +254,7 @@ class StateGridDataClient:
                 if B is not _D:
                         try:
                                 A.keyCode=B[_A9];A.publicKey=B[_AR];A.accessToken=B[_Ak];A.refreshToken=B[_Al];A.token=B[_AA];A.userInfo=B[_AS];A.powerUserList=B[_AT];A.doorAccountDict=B.get(_Am,{});A.is_debug=B['is_debug'];A.dataVersion=B[_An];A.account=B[_j];A.password=B[_AF];A.refresh_interval=B[_Ao]
-                                if A.refresh_interval<12:A.refresh_interval=12
+                                if A.refresh_interval<1:A.refresh_interval=0.017
                                 # 增强字段
                                 A.llm_api_key=B.get('llm_api_key','')
                                 A.llm_base_url=B.get('llm_base_url','https://ark.cn-beijing.volces.com/api/v3')
@@ -801,7 +801,7 @@ class StateGridDataClient:
                                 A[_AD]=normal_round(q,2);A[_A3]=normal_round(r,2);A[_A4]=normal_round(s,2);A[_A5]=normal_round(t,2);A[_A6]=normal_round(u,2)
                                 if K:
                                         Z=G-datetime.timedelta(days=G.day)
-                                        if _S not in A or len(A[_S])<12:await C.__get_door_bill(A,Z.year-1)
+                                        if _S not in A or len(A[_S])<24:await C.__get_door_bill(A,Z.year-2);await C.__get_door_bill(A,Z.year-1)
                                         v=await C.__get_door_bill(A,Z.year)
                                         if v is not _D:A[S]=v
                                         w=[]
@@ -826,9 +826,14 @@ class StateGridDataClient:
                                                 for B in A[J]:M+=catchFloat(B,e);N+=B[_A3];O+=B[_A4];P+=B[_A5];Q+=B[_A6]
                                         if K and G.month!=a.month:M+=A[_AD];N+=A[_A3];O+=A[_A4];P+=A[_A5];Q+=A[_A6]
                                 A[T]=normal_round(M,2);A['year_p_ele_num']=normal_round(N,2);A['year_v_ele_num']=normal_round(O,2);A['year_n_ele_num']=normal_round(P,2);A['year_t_ele_num']=normal_round(Q,2)
+                                # Fetch current month daily
+                                _now=datetime.datetime.now()
+                                if _now.day>1:
+                                    _cms=datetime.date(_now.year,_now.month,1)
+                                    await C.__get_door_daily_bill(A,_now.year,_cms.strftime('%Y-%m-%d'),_now.strftime('%Y-%m-%d'),None)
                                 if _i in A:
                                         b=[]
-                                        for B in A[_i][:30]:b.append({R:B[R],'ele':normal_round(catchFloat(B,_t),2),'v_ele':normal_round(catchFloat(B,_A0),2),'p_ele':normal_round(catchFloat(B,_z),2),'n_ele':normal_round(catchFloat(B,_A1),2),'t_ele':normal_round(catchFloat(B,_A2),2)})
+                                        for B in A[_i][:60]:b.append({R:B[R],'ele':normal_round(catchFloat(B,_t),2),'v_ele':normal_round(catchFloat(B,_A0),2),'p_ele':normal_round(catchFloat(B,_z),2),'n_ele':normal_round(catchFloat(B,_A1),2),'t_ele':normal_round(catchFloat(B,_A2),2)})
                                         b.reverse();A[A4]=b
                                 else:A[A4]=[]
                                 if _S in A:

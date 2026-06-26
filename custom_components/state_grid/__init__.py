@@ -32,7 +32,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             data_client.email_account = merged["email_account"]
         if "refresh_interval" in merged:
             try:
-                data_client.refresh_interval = max(12, int(merged["refresh_interval"]))
+                data_client.refresh_interval = max(1, int(merged["refresh_interval"]))
             except (ValueError, TypeError):
                 pass
 
