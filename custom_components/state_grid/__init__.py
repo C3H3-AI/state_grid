@@ -31,6 +31,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if "email_account" in merged:
             data_client.email_account = merged["email_account"]
         if "refresh_interval" in merged:
+        if "pricing" in merged:
+            data_client.pricing_config = merged["pricing"]
             try:
                 data_client.refresh_interval = max(1, int(merged["refresh_interval"]))
             except (ValueError, TypeError):
