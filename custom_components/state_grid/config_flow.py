@@ -2,7 +2,8 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers.selector import selector
-from .const import DOMAIN, LLM_BASE_URL, LLM_MODEL
+from .const import DOMAIN
+from .const import (BILLING_YEAR_LADDER, BILLING_YEAR_LADDER_FPG, BILLING_AVERAGE, CONF_BILLING_STANDARD, CONF_LADDER_LEVEL_1, CONF_LADDER_LEVEL_2, CONF_LADDER_PRICE_1, CONF_LADDER_PRICE_2, CONF_LADDER_PRICE_3, CONF_PRICE_PEAK, CONF_PRICE_VALLEY, CONF_AVERAGE_PRICE, CONF_FAMILY_MEMBERS, DEFAULT_LADDER_LEVEL_1, DEFAULT_LADDER_LEVEL_2, DEFAULT_LADDER_PRICE_1, DEFAULT_LADDER_PRICE_2, DEFAULT_LADDER_PRICE_3, DEFAULT_PRICE_PEAK, DEFAULT_PRICE_VALLEY, DEFAULT_AVERAGE_PRICE, DEFAULT_FAMILY_MEMBERS), LLM_BASE_URL, LLM_MODEL
 from .utils.logger import LOGGER
 from .data_client import StateGridDataClient
 from . import click_captcha_solver
@@ -236,8 +237,60 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 ): selector({"text": {"type": "text"}}),
                 vol.Optional(
                     "refresh_interval",
+                    default=_str(                vol.Optional(
+                    "refresh_interval",
                     default=_str("refresh_interval", "12"),
                     description="刷新间隔（小时，填 1-48 之间的整数）",
+                ): selector({"text": {"type": "text"}}),
+                # ── 电价配置 ──
+                vol.Optional(
+                    CONF_BILLING_STANDARD,
+                    default=_str(CONF_BILLING_STANDARD, BILLING_YEAR_LADDER),
+                ): selector({"select": {"options": ["year_ladder", "year_ladder_fpg", "average"], "translation_key": "billing_standard"}}),
+                vol.Optional(
+                    CONF_FAMILY_MEMBERS,
+                    default=_str(CONF_FAMILY_MEMBERS, "0"),
+                    description="一户多人人数（0=不启用，5=5人，7=7人以上）",
+                ): selector({"text": {"type": "text"}}),
+                vol.Optional(
+                    CONF_LADDER_LEVEL_1,
+                    default=_str(CONF_LADDER_LEVEL_1, str(DEFAULT_LADDER_LEVEL_1)),
+                    description="一档上限（kWh）",
+                ): selector({"text": {"type": "text"}}),
+                vol.Optional(
+                    CONF_LADDER_LEVEL_2,
+                    default=_str(CONF_LADDER_LEVEL_2, str(DEFAULT_LADDER_LEVEL_2)),
+                    description="二档上限（kWh）",
+                ): selector({"text": {"type": "text"}}),
+                vol.Optional(
+                    CONF_LADDER_PRICE_1,
+                    default=_str(CONF_LADDER_PRICE_1, str(DEFAULT_LADDER_PRICE_1)),
+                    description="一档电价（元/kWh）",
+                ): selector({"text": {"type": "text"}}),
+                vol.Optional(
+                    CONF_LADDER_PRICE_2,
+                    default=_str(CONF_LADDER_PRICE_2, str(DEFAULT_LADDER_PRICE_2)),
+                    description="二档电价（元/kWh）",
+                ): selector({"text": {"type": "text"}}),
+                vol.Optional(
+                    CONF_LADDER_PRICE_3,
+                    default=_str(CONF_LADDER_PRICE_3, str(DEFAULT_LADDER_PRICE_3)),
+                    description="三档电价（元/kWh）",
+                ): selector({"text": {"type": "text"}}),
+                vol.Optional(
+                    CONF_PRICE_PEAK,
+                    default=_str(CONF_PRICE_PEAK, str(DEFAULT_PRICE_PEAK)),
+                    description="峰电电价（元/kWh）",
+                ): selector({"text": {"type": "text"}}),
+                vol.Optional(
+                    CONF_PRICE_VALLEY,
+                    default=_str(CONF_PRICE_VALLEY, str(DEFAULT_PRICE_VALLEY)),
+                    description="谷电电价（元/kWh）",
+                ): selector({"text": {"type": "text"}}),
+                vol.Optional(
+                    CONF_AVERAGE_PRICE,
+                    default=_str(CONF_AVERAGE_PRICE, str(DEFAULT_AVERAGE_PRICE)),
+                    description="平均单价（元/kWh）",
                 ): selector({"text": {"type": "text"}}),
             }
         )

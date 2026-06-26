@@ -833,7 +833,7 @@ class StateGridDataClient:
                                     await C.__get_door_daily_bill(A,_now.year,_cms.strftime('%Y-%m-%d'),_now.strftime('%Y-%m-%d'),None)
                                 if _i in A:
                                         b=[]
-                                        for B in A[_i][:60]:b.append({R:B[R],'ele':normal_round(catchFloat(B,_t),2),'v_ele':normal_round(catchFloat(B,_A0),2),'p_ele':normal_round(catchFloat(B,_z),2),'n_ele':normal_round(catchFloat(B,_A1),2),'t_ele':normal_round(catchFloat(B,_A2),2)})
+                                        for B in A[_i][:60]:b.append({R:B[R],'ele':normal_round(catchFloat(B,_t),2),'v_ele':normal_round(catchFloat(B,_A0),2),'p_ele':normal_round(catchFloat(B,_z),2),'n_ele':normal_round(catchFloat(B,_A1),2),'t_ele':normal_round(catchFloat(B,_A2),2),'cost':round(_pricing_calc(catchFloat(B,_t),catchFloat(B,_z),catchFloat(B,_A0),A.get(T,0) or 0,C.pricing_config if hasattr(C,'pricing_config') else {}),2)})
                                         b.reverse();A[A4]=b
                                 else:A[A4]=[]
                                 if _S in A:
